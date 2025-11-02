@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Vendor Map (mobile friendly)</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<style>
+  html,body,#map { height: 100%; margin: 0; padding: 0; }
+  .topbar { position: absolute; top: 8px; left: 8px; right: 8px; z-index:1000; display:flex; gap:8px; }
+  .topbar button { padding:8px 10px; font-size:14px; border-radius:8px; border:1px solid #444; background: #fff; }
+  .legend { background: rgba(255,255,255,0.9); padding:8px; border-radius:6px; font-size:14px; }
+  @media (max-width:600px) { .topbar button { font-size:13px; padding:7px; } }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="topbar">
+  <div class="legend">Drag markers to match booth positions on the background map.<br/>Tap a marker for vendor details.</div>
+  <div style="margin-left:auto;">
+    <button id="downloadGeo">Save positions (GeoJSON)</button>
+    <button id="downloadHTML">Download adjusted HTML</button>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// Configuration: replace 'map.png' with your converted PDF-to-PNG file name if different.
+const mapImage = "map.png";
+
+// Image size in pixels - set a default. If you convert the PDF to PNG, note the image's width & height (px) and update here.
+const imageWidth = 2000; // px - update if your map.png is different
+const imageHeight = 1500; // px - update if your map.png is different
+
+// Initialize map with CRS.Simple for image coordinate space
+const map = L.map('map', {
+  crs: L.CRS.Simple,
+  minZoom: -5,
+  maxZoom: 4
+});
+
+// Calculate bounds so image fits
+const southWest = map.unproject([0, imageHeight], map.getMaxZoom()-1);
+const northEast = map.unproject([imageWidth, 0], map.getMaxZoom()-1);
+const bounds = new L.LatLngBounds(southWest, northEast);
+
+L.imageOverlay(mapImage, bounds).addTo(map);
+map.setMaxBounds(bounds);
+map.fitBounds(bounds);
+
+// Load vendor data (vendors_sheet1.json expected alongside this HTML)
+async function loadVendors() {
+  const res = await fetch('vendors_sheet1.json');
+  const vendors = await res.json();
+  return vendors;
+}
+
+function makePopupHTML(rec) {
+  let html = "<strong>" + (rec.Name || rec.Vendor || rec['Vendor Name'] || 'Vendor') + "</strong><br/>";
+  if (rec.Booth) html += "Booth: " + rec.Booth + "<br/>";
+  for (const k of Object.keys(rec)) {
+    if (['Name','Vendor','Vendor Name','Booth'].includes(k)) continue;
+    if (rec[k]) html += "<small><strong>" + k + ":</strong> " + rec[k] + "<br/></small>";
+  }
+  return html;
+}
+
+// Add markers from vendor list; place them initially in a sidebar grid based on booth if coordinates unknown
+loadVendors().then(vendors => {
+  window._vendors = vendors; // keep for later
+  const markers = [];
+  const spacingX = imageWidth / 10;
+  let xIndex = 0;
+  let yIndex = 0;
+
+  vendors.forEach((v, idx) => {
+    // initial placement heuristic: spread markers horizontally/vertically by index (user will drag to correct spot)
+    const px = 100 + (xIndex * spacingX);
+    const py = 100 + (yIndex * 150);
+    xIndex = (xIndex + 1) % 8;
+    if (xIndex === 0) yIndex++;
+
+    const latlng = map.unproject([px, py], map.getMaxZoom()-1);
+    const marker = L.marker(latlng, {draggable:true}).addTo(map);
+    marker.bindPopup(makePopupHTML(v));
+    marker.vendor = v;
+    markers.push(marker);
+  });
+
+  // Save button to download GeoJSON
+  document.getElementById('downloadGeo').addEventListener('click', () => {
+    const features = markers.map(m => {
+      const p = map.project(m.getLatLng(), map.getMaxZoom()-1);
+      return {
+        type: "Feature",
+        properties: Object.assign({}, m.vendor),
+        geometry: {
+          type: "Point",
+          // store pixel coords relative to top-left of image for robust re-placement
+          coordinates: [Math.round(p.x), Math.round(p.y)]
+        }
+      };
+    });
+    const geo = { type: "FeatureCollection", features };
+    const blob = new Blob([JSON.stringify(geo, null, 2)], {type: "application/json"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'vendor_positions.geojson';
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  // Download adjusted HTML: embeds the saved positions and image size into an HTML file for easy hosting
+  document.getElementById('downloadHTML').addEventListener('click', () => {
+    const features = markers.map(m => {
+      const p = map.project(m.getLatLng(), map.getMaxZoom()-1);
+      return {
+        properties: m.vendor,
+        coords: [Math.round(p.x), Math.round(p.y)]
+      };
+    });
+    const embed = btoa(unescape(encodeURIComponent(JSON.stringify(features))));
+    const fullHtml = `<!doctype html>
+<html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Vendor Map (placed)</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/></head><body style="margin:0"><div id="map" style="width:100vw;height:100vh"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const imageWidth = $2000, imageHeight = $1500;
+const map = L.map('map', {crs:L.CRS.Simple});
+const southWest = map.unproject([0, imageHeight], map.getMaxZoom()-1);
+const northEast = map.unproject([imageWidth, 0], map.getMaxZoom()-1);
+const bounds = new L.LatLngBounds(southWest, northEast);
+L.imageOverlay('map.png', bounds).addTo(map);
+map.fitBounds(bounds);
+const features = JSON.parse(decodeURIComponent(escape(atob('${{embed}}'))));
+features.forEach(f => {
+  const p = map.unproject(f.coords, map.getMaxZoom()-1);
+  L.marker(p).addTo(map).bindPopup("<strong>" + (f.properties.Name || f.properties.Vendor || f.properties['Vendor Name'] || 'Vendor') + "</strong><br/>Booth: " + (f.properties.Booth || ''));
+});
+</script></body></html>`;
+    const blob = new Blob([fullHtml], {type:"text/html"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'vendor_map_placed.html';
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+});
+
+</script>
+</body>
+</html>
